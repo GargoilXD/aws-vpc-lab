@@ -1,0 +1,403 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Highly Available Multi-AZ VPC with NAT Gateways, SSM-only EC2 Management, 
+  and Apache Web Tier. Demonstrates fault-tolerant networking and secure IaC.
+
+Parameters:
+  Environment:
+    Type: String
+    Default: Lab
+    Description: Environment name used for resource tagging
+  FullName:
+    Type: String
+    Default: Your Full Name
+    Description: Full name displayed on the public web page
+  LabName:
+    Type: String
+    Default: Multi-AZ VPC Lab
+    Description: Lab name displayed on the public web page
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: [t3.micro, t3.small]
+    Description: EC2 instance type for all compute nodes
+
+# Dynamically fetch latest Amazon Linux 2023 AMI
+Mappings:
+  AmazonLinuxAMI:
+    LatestAL2023:
+      SSMParam: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64
+
+Resources:
+  # VPC & GATEWAYS
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-VPC
+        - Key: Environment
+          Value: !Ref Environment
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-IGW
+
+  IGWAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # SUBNETS
+  PublicSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Public-A
+        - Key: Tier
+          Value: Public
+        - Key: AZ
+          Value: !Select [0, !GetAZs '']
+
+  PublicSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Public-B
+        - Key: Tier
+          Value: Public
+        - Key: AZ
+          Value: !Select [1, !GetAZs '']
+
+  PrivateSubnetA:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.3.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Private-A
+        - Key: Tier
+          Value: Private
+        - Key: AZ
+          Value: !Select [0, !GetAZs '']
+
+  PrivateSubnetB:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: !Select [1, !GetAZs '']
+      CidrBlock: 10.0.4.0/24
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Private-B
+        - Key: Tier
+          Value: Private
+        - Key: AZ
+          Value: !Select [1, !GetAZs '']
+
+  # NAT GATEWAYS & EIPS
+  EIPNatA:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  EIPNatB:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NATGatewayA:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNatA.AllocationId
+      SubnetId: !Ref PublicSubnetA
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-NAT-A
+        - Key: AZ
+          Value: !Select [0, !GetAZs '']
+
+  NATGatewayB:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIPNatB.AllocationId
+      SubnetId: !Ref PublicSubnetB
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-NAT-B
+        - Key: AZ
+          Value: !Select [1, !GetAZs '']
+
+  # ROUTE TABLES
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Public-RT
+
+  PrivateRouteTableA:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Private-RT-A
+
+  PrivateRouteTableB:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Private-RT-B
+
+  PublicRouteToIGW:
+    Type: AWS::EC2::Route
+    DependsOn: IGWAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PrivateRouteAToNATA:
+    Type: AWS::EC2::Route
+    DependsOn: NATGatewayA
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableA
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayA
+
+  PrivateRouteBToNATB:
+    Type: AWS::EC2::Route
+    DependsOn: NATGatewayB
+    Properties:
+      RouteTableId: !Ref PrivateRouteTableB
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NATGatewayB
+
+  PublicSubnetARouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetA
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetBRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnetB
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateSubnetARouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetA
+      RouteTableId: !Ref PrivateRouteTableA
+
+  PrivateSubnetBRouteTableAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetB
+      RouteTableId: !Ref PrivateRouteTableB
+
+  # IAM & SSM
+  SSMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Environment}-SSM-Role
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-SSM-Role
+
+  SSMInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles: [!Ref SSMRole]
+      InstanceProfileName: !Sub ${Environment}-SSM-InstanceProfile
+
+  # SECURITY GROUPS
+  PublicSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-Public-SG
+      GroupDescription: Allow HTTP & ICMP inbound. Outbound restricted to required services.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP Web Access
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: ICMP Ping for Validation
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: SSM & HTTPS Outbound
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: ICMP Outbound
+
+  PrivateSG:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupName: !Sub ${Environment}-Private-SG
+      GroupDescription: Allow ICMP inbound. Outbound restricted to required services.
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: ICMP Ping for Validation
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: SSM & HTTPS Outbound
+        - IpProtocol: icmp
+          FromPort: -1
+          ToPort: -1
+          CidrIp: 0.0.0.0/0
+          Description: ICMP Outbound
+
+  # EC2 INSTANCES
+  WebUserData:
+    Type: AWS::SSM::Parameter
+    Properties:
+      Name: /lab/web-userdata
+      Type: String
+      Value: !Sub |
+        #!/bin/bash
+        set -e
+        yum update -y
+        yum install -y httpd
+        systemctl start httpd
+        systemctl enable httpd
+        cat > /var/www/html/index.html << 'EOF'
+        <!DOCTYPE html>
+        <html>
+        <head><title>${LabName}</title></head>
+        <body>
+          <h1>${FullName}</h1>
+          <p>Lab Name: ${LabName}</p>
+        </body>
+        </html>
+        EOF
+
+  PublicWebA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnetA
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds: [!Ref PublicSG]
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Web-A
+        - Key: Tier
+          Value: Web
+        - Key: AZ
+          Value: !Select [0, !GetAZs '']
+
+  PublicWebB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PublicSubnetB
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds: [!Ref PublicSG]
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-Web-B
+        - Key: Tier
+          Value: Web
+        - Key: AZ
+          Value: !Select [1, !GetAZs '']
+
+  PrivateAppA:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnetA
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds: [!Ref PrivateSG]
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-App-A
+        - Key: Tier
+          Value: Application
+        - Key: AZ
+          Value: !Select [0, !GetAZs '']
+
+  PrivateAppB:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub "{{resolve:ssm:/aws/service/ami-amazon-linux-latest/al2023-ami-kernel-6.1-x86_64}}"
+      InstanceType: !Ref InstanceType
+      SubnetId: !Ref PrivateSubnetB
+      IamInstanceProfile: !Ref SSMInstanceProfile
+      SecurityGroupIds: [!Ref PrivateSG]
+      Tags:
+        - Key: Name
+          Value: !Sub ${Environment}-App-B
+        - Key: Tier
+          Value: Application
+        - Key: AZ
+          Value: !Select [1, !GetAZs '']
+
+Outputs:
+  VPCId:
+    Description: VPC ID
+    Value: !Ref VPC
+  PublicWebAIP:
+    Description: Public Web Instance A IP
+    Value: !GetAtt PublicWebA.PublicIp
+  PublicWebBIP:
+    Description: Public Web Instance B IP
+    Value: !GetAtt PublicWebB.PublicIp
+  SSMConnectCommand:
+    Description: Example SSM Session Manager command
+    Value: "aws ssm start-session --target <instance-id>"
