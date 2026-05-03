@@ -63,8 +63,6 @@ Resources:
           Value: !Sub ${Environment}-Public-A
         - Key: Tier
           Value: Public
-        - Key: AZ
-          Value: !Select [0, !GetAZs '']
 
   PublicSubnetB:
     Type: AWS::EC2::Subnet
@@ -78,8 +76,6 @@ Resources:
           Value: !Sub ${Environment}-Public-B
         - Key: Tier
           Value: Public
-        - Key: AZ
-          Value: !Select [1, !GetAZs '']
 
   # PRIVATE SUBNETS
   PrivateSubnetA:
@@ -94,8 +90,6 @@ Resources:
           Value: !Sub ${Environment}-Private-A
         - Key: Tier
           Value: Private
-        - Key: AZ
-          Value: !Select [0, !GetAZs '']
 
   PrivateSubnetB:
     Type: AWS::EC2::Subnet
@@ -109,8 +103,6 @@ Resources:
           Value: !Sub ${Environment}-Private-B
         - Key: Tier
           Value: Private
-        - Key: AZ
-          Value: !Select [1, !GetAZs '']
 
   # ELASTIC IPS & NAT GATEWAYS
   EIPNatA:
@@ -150,7 +142,6 @@ Resources:
         - Key: Name
           Value: !Sub ${Environment}-Public-RT
 
-  # Route for public subnets -> IGW
   PublicRoute:
     Type: AWS::EC2::Route
     DependsOn: IGWAttachment
@@ -159,7 +150,6 @@ Resources:
       DestinationCidrBlock: 0.0.0.0/0
       GatewayId: !Ref InternetGateway
 
-  # Associate public subnets with the public route table
   PublicSubnetARouteTableAssoc:
     Type: AWS::EC2::SubnetRouteTableAssociation
     Properties:
@@ -172,7 +162,6 @@ Resources:
       SubnetId: !Ref PublicSubnetB
       RouteTableId: !Ref PublicRouteTable
 
-  # Private route table for AZ A -> NAT in AZ A
   PrivateRouteTableA:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -195,7 +184,6 @@ Resources:
       SubnetId: !Ref PrivateSubnetA
       RouteTableId: !Ref PrivateRouteTableA
 
-  # Private route table for AZ B -> NAT in AZ B
   PrivateRouteTableB:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -241,8 +229,6 @@ Resources:
       Roles: [!Ref SSMRole]
 
   # SECURITY GROUPS
-  # Public Web SG: allow HTTP from anywhere, ICMP for validation.
-  # Outbound: HTTPS (443), DNS (UDP 53), and ICMP.
   PublicSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -279,8 +265,6 @@ Resources:
         - Key: Name
           Value: !Sub ${Environment}-Public-SG
 
-  # Private App SG: no inbound HTTP, only ICMP (validation).
-  # Outbound same as public: HTTPS, DNS, ICMP.
   PrivateSG:
     Type: AWS::EC2::SecurityGroup
     Properties:
@@ -313,35 +297,6 @@ Resources:
           Value: !Sub ${Environment}-Private-SG
 
   # EC2 INSTANCES
-  # UserData script for public web instances
-  WebUserData:
-    Type: AWS::SSM::Parameter
-    Properties:
-      Name: !Sub /${Environment}/web-userdata
-      Type: String
-      Value: !Sub |
-        #!/bin/bash
-        set -e
-        # Update system and install Apache
-        yum update -y
-        yum install -y httpd
-        systemctl start httpd
-        systemctl enable httpd
-        # Create custom web page with full name and lab name
-        cat > /var/www/html/index.html << EOF
-        <!DOCTYPE html>
-        <html>
-        <head><title>${LabName}</title></head>
-        <body>
-          <h1>${FullName}</h1>
-          <p>Lab Name: ${LabName}</p>
-          <p>Instance ID: $(curl -s http://169.254.169.254/latest/meta-data/instance-id)</p>
-          <p>Availability Zone: $(curl -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
-        </body>
-        </html>
-        EOF
-
-  # Public Web Instance A (AZ A)
   PublicWebA:
     Type: AWS::EC2::Instance
     Properties:
@@ -350,14 +305,36 @@ Resources:
       SubnetId: !Ref PublicSubnetA
       IamInstanceProfile: !Ref SSMInstanceProfile
       SecurityGroupIds: [!Ref PublicSG]
-      UserData: !Ref WebUserData
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          
+          # Get IMDSv2 token
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+          
+          cat > /var/www/html/index.html << EOF
+          <!DOCTYPE html>
+          <html>
+          <head><title>${LabName}</title></head>
+          <body>
+            <h1>${FullName}</h1>
+            <p>Lab Name: ${LabName}</p>
+            <p>Instance ID: $(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)</p>
+            <p>Availability Zone: $(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+          </body>
+          </html>
+          EOF
       Tags:
         - Key: Name
           Value: !Sub ${Environment}-Web-A
         - Key: Tier
           Value: Web
 
-  # Public Web Instance B (AZ B)
   PublicWebB:
     Type: AWS::EC2::Instance
     Properties:
@@ -366,14 +343,37 @@ Resources:
       SubnetId: !Ref PublicSubnetB
       IamInstanceProfile: !Ref SSMInstanceProfile
       SecurityGroupIds: [!Ref PublicSG]
-      UserData: !Ref WebUserData
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          set -e
+          yum update -y
+          yum install -y httpd
+          systemctl start httpd
+          systemctl enable httpd
+          
+          # Get IMDSv2 token
+          TOKEN=$(curl -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null)
+          
+          cat > /var/www/html/index.html << EOF
+          <!DOCTYPE html>
+          <html>
+          <head><title>${LabName}</title></head>
+          <body>
+            <h1>${FullName}</h1>
+            <p>Lab Name: ${LabName}</p>
+            <p>Instance ID: $(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/instance-id)</p>
+            <p>Availability Zone: $(curl -H "X-aws-ec2-metadata-token: $TOKEN" -s http://169.254.169.254/latest/meta-data/placement/availability-zone)</p>
+          </body>
+          </html>
+          EOF
+
       Tags:
         - Key: Name
           Value: !Sub ${Environment}-Web-B
         - Key: Tier
           Value: Web
 
-  # Private App Instance A (AZ A)
   PrivateAppA:
     Type: AWS::EC2::Instance
     Properties:
@@ -388,7 +388,6 @@ Resources:
         - Key: Tier
           Value: Application
 
-  # Private App Instance B (AZ B)
   PrivateAppB:
     Type: AWS::EC2::Instance
     Properties:
@@ -403,17 +402,16 @@ Resources:
         - Key: Tier
           Value: Application
 
-# OUTPUTS (for validation)
 Outputs:
   VPCId:
     Description: VPC ID
     Value: !Ref VPC
 
-  PublicWebA_IP:
+  PublicWebAIP:
     Description: Public IP of Web Instance A
     Value: !GetAtt PublicWebA.PublicIp
 
-  PublicWebB_IP:
+  PublicWebBIP:
     Description: Public IP of Web Instance B
     Value: !GetAtt PublicWebB.PublicIp
 
@@ -421,6 +419,6 @@ Outputs:
     Description: Example SSM Session Manager command (replace <instance-id>)
     Value: "aws ssm start-session --target <instance-id>"
 
-  PrivateInstances_IDS:
+  PrivateInstancesIDS:
     Description: Private instance IDs for SSM access
     Value: !Sub "PrivateAppA: ${PrivateAppA}, PrivateAppB: ${PrivateAppB}"
